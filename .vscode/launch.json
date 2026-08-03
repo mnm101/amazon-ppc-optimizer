@@ -1,0 +1,48 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "PPC Optimizer (7-day export)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/ppc_optimizer.py",
+      "args": ["--window-days", "7"],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "justMyCode": true
+    },
+    {
+      "name": "PPC Optimizer (ask me the window length)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/ppc_optimizer.py",
+      "args": ["--window-days", "${input:windowDays}"],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "justMyCode": true
+    },
+    {
+      "name": "PPC Optimizer (sample data)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/ppc_optimizer.py",
+      "args": [
+        "data/sample_keywords.xlsx",
+        "data/sample_placements.xlsx",
+        "-o",
+        "outputs/sample.xlsx"
+      ],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "justMyCode": true
+    }
+  ],
+  "inputs": [
+    {
+      "id": "windowDays",
+      "type": "promptString",
+      "description": "How many days does this export cover? (must match the export)",
+      "default": "7"
+    }
+  ]
+}
