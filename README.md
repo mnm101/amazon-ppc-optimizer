@@ -124,6 +124,27 @@ export cycles, so every run is reviewable.
 - **Blank bids** (auto/ASIN targets inheriting the ad-group default) are never
   treated as $0 — they're flagged `REVIEW - NO BID IN EXPORT` with the
   revenue-justified figure, since no percentage step is meaningful without a base.
+- **The bid cap must actually be binding.** Under down-only the bid is a true
+  ceiling, so realized CPC can never exceed it. When CPC sits below **70% of the
+  base bid** (with ≥10 clicks, since `Cost` rounding makes CPC unreliable below
+  that), the auctions are clearing well under the cap and the bid is not the
+  lever: a raise could only win the thin, empty slice just above the old cap, and
+  a cut merely shaves a ceiling nobody reaches.
+  - Raises are held as **`HOLD - BID NOT THE CONSTRAINT`**, pointing at
+    impressions/relevance instead.
+  - Cuts still proceed (they do trim volume at the margin) but the reason says
+    the bid must reach ~CPC before what you *pay* changes.
+  - Either way the row is flagged **`Bid Cap Unused = YES`**, a separate column
+    from `Action` so the diagnostic survives even when a suppressing campaign
+    relabels the row.
+  - Measured against the **base bid**, not `base × (1+adj)`: the adjustment
+    uplift is already inside realized CPC, and using the campaign's *max*
+    adjustment invents headroom for keywords that never serve on the boosted
+    placement (it wrongly froze winners paying 100% of their base bid).
+- **Sponsored Products only.** Exports often mix campaign types; Sponsored Brands
+  campaigns are detected via `Campaign type` and skipped, with a count printed at
+  run time. SB has a different placement taxonomy (`Other Placements`) and permits
+  negative adjustments, so every rule here would be wrong for it.
 
 ### Data limits worth knowing
 - Amazon exports carry no keyword×placement performance, so each keyword's
