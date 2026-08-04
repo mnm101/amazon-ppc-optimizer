@@ -52,7 +52,20 @@
       "Bash(python \"C:\\\\Users\\\\effcom24-1\\\\Downloads\\\\ppc-optimizer\\\\ppc-optimizer\\\\ppc_optimizer.py\" --window-days 7)",
       "Bash(python -c \"import sys,pandas,openpyxl; print\\('interpreter:',sys.executable\\); print\\('pandas',pandas.__version__,'| openpyxl',openpyxl.__version__\\)\")",
       "Bash(sed -n '/^def _kw_rec_row/,/^    }/p' ppc_optimizer.py)",
-      "Bash(sed -n '/^def normalize/,/for c in num_cols/p' ppc_optimizer.py)"
+      "Bash(sed -n '/^def normalize/,/for c in num_cols/p' ppc_optimizer.py)",
+      "Bash(python \"C:\\\\Users\\\\EFFCOM~1\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-effcom24-1-Downloads-ppc-optimizer-ppc-optimizer\\\\d0f81e5f-8c72-4851-b838-b6556caad139\\\\scratchpad\\\\patch7.py\")",
+      "Bash(python -m pytest -q tests/test_optimizer.py::test_near_target_is_held_not_cut)",
+      "Bash(python ppc_optimizer.py --window-days 7 -o outputs/recs_new.xlsx)",
+      "Bash(python \"C:\\\\Users\\\\EFFCOM~1\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-effcom24-1-Downloads-ppc-optimizer-ppc-optimizer\\\\d0f81e5f-8c72-4851-b838-b6556caad139\\\\scratchpad\\\\patch8.py\")",
+      "Bash(git status *)",
+      "Bash(git check-ignore *)",
+      "Bash(grep -v '^$')",
+      "Bash(git ls-tree *)",
+      "Bash(git checkout *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(GIT_TERMINAL_PROMPT=0 timeout 90 git push -u origin bid-cap-brake-and-sb-exclusion)",
+      "Bash(git ls-remote *)"
     ]
   }
 }
