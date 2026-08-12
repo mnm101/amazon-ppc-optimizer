@@ -35,7 +35,6 @@ Assumptions (documented in the output 'Settings & Notes' tab):
       suppressed by cutting base bids and compensating the others (that is lam).
       (Negative settings on Sponsored Brands rows are held, never raised.)
 
-      
 Bids and placement adjustments are solved as ONE coupled system, because the
 effective CPC at a placement is base bid x (1 + that placement's adjustment):
 
@@ -141,6 +140,17 @@ DEAD_PLACEMENT_CLICK_MULT = 1.5  # a 0-order placement is only "dead" once it ha
 LOW_CLICK_CLICKS = 10          # active kw/target with <= this many clicks in the
 LOW_CLICK_BUMP = 0.05          # window gets a +5% exposure bump (never overrides a
                                # cut/pause or a larger raise).
+# Is the bid cap actually binding? Under dynamic bids DOWN-ONLY the bid is a true
+# ceiling, so realized CPC can never exceed it. When realized CPC sits far below
+# the bid, the auctions are clearing well under the cap: raising it can only win
+# auctions in the thin, empty slice just above the old cap, and lowering it only
+# shaves a ceiling nobody is reaching. Either way the bid is not the lever.
+# Measured against the BASE BID, not base x (1+adjustment): the adjustment uplift
+# is already inside the realized CPC, and using the campaign's max adjustment
+# manufactures headroom for keywords that never serve on the boosted placement.
+CAP_SLACK_RATIO = 0.70         # CPC below this share of the bid -> cap is slack
+CAP_SLACK_MIN_CLICKS = 10      # ... but only trust CPC with this many clicks,
+                               # because Cost is rounded to whole dollars
 # ============================================================================
 
 KW_REQUIRED = ["Campaign Name", "Campaign ID", "Ad Group", "Target", "Match Type",
@@ -182,6 +192,11 @@ PLACEMENT_LABELS = {
     "product_page": "Product Pages",
     "off_amazon": "Off-Amazon",
 }
+
+# Campaign types this engine is valid for. Sponsored Brands uses a different
+# placement taxonomy and permits negative adjustments, so SB campaigns are
+# excluded rather than silently given Sponsored Products recommendations.
+SP_CAMPAIGN_TYPES = ("sponsoredproducts", "sponsored products", "sp")
 
 # Raw placement label (stripped, lower-cased) -> canonical category.
 # "__IGNORE__" rows are dropped from the recommendations entirely.
@@ -299,6 +314,35 @@ def load_inputs(kw_path: str, pl_path: str | None):
     kw = load_sheet(kw_path, None, KW_REQUIRED, "Keyword", KW_ALIASES, True)
     pl = load_sheet(pl_path, None, PL_REQUIRED, "Placement", PL_ALIASES, False)
     return kw, pl
+
+
+def filter_to_sponsored_products(kw: pd.DataFrame, pl: pd.DataFrame):
+    """Drop campaigns that are not Sponsored Products.
+
+    Exports can mix campaign types in one file. Sponsored Brands has its own
+    placement taxonomy and allows negative bid adjustments, so every rule in this
+    engine - the 0% floor, the lambda suppression, the placement canonicaliser -
+    would be wrong for it. Returns (kw, pl, info) with info=None when nothing was
+    dropped."""
+    if "Campaign type" not in pl.columns:
+        return kw, pl, None
+    types = pl["Campaign type"].astype(str).str.strip().str.lower()
+    sp_ids = set(pl.loc[types.isin(SP_CAMPAIGN_TYPES), "Campaign ID"])
+    other_ids = set(pl.loc[~types.isin(SP_CAMPAIGN_TYPES), "Campaign ID"]) - sp_ids
+    if not other_ids:
+        return kw, pl, None
+    dropped_kw = kw["Campaign ID"].isin(other_ids)
+    info = {
+        "campaigns": len(other_ids),
+        "keyword_rows": int(dropped_kw.sum()),
+        "placement_rows": int(pl["Campaign ID"].isin(other_ids).sum()),
+        "spend": float(pd.to_numeric(kw.loc[dropped_kw, "Cost"],
+                                     errors="coerce").fillna(0).sum()),
+        "types": sorted(set(pl.loc[pl["Campaign ID"].isin(other_ids),
+                                   "Campaign type"].astype(str))),
+    }
+    return (kw[~dropped_kw].copy(),
+            pl[~pl["Campaign ID"].isin(other_ids)].copy(), info)
 
 
 def _clean_id(v) -> str:
@@ -419,6 +463,9 @@ def _kw_rec_row(r: pd.Series, rec: dict) -> dict:
         "Effective Change": round(rec.get("eff_change", 0.0), 4),
         "Action": rec["action"], "Confidence": rec["confidence"],
         "Change Capped": "YES" if rec["capped"] else "",
+        # diagnostic, kept separate from Action because a braked row can still be
+        # relabelled when its campaign is suppressing via base bids
+        "Bid Cap Unused": "YES" if rec.get("cap_slack") else "",
         "Reason": rec["reason"] + (f" [{r['_data_issue']}]" if r["_data_issue"] else ""),
     })
     return row
@@ -614,10 +661,23 @@ def solve_campaign_placements(g: pd.DataFrame, s: CampaignStats,
         conf = _confidence(r["Conversions"], r["Clicks"])
         spent = f"{int(r['Clicks'])} clicks, ${r['Cost']:.2f}"
         if cur > PLACEMENT_MAX:               # legacy setting above the cap
-            new = max(PLACEMENT_MAX, round(cur - PLACEMENT_STEP, 2))
+            # Step it toward the ceiling, but never let that compound with a
+            # base-bid cut: bound the EFFECTIVE drop at SUPPRESS_STEP, like every
+            # other placement. When lam alone already delivers that much, the
+            # adjustment is held and comes down on a later run.
+            eff_floor = (1 - SUPPRESS_STEP) * (1 + cur) / lam - 1 if lam > 0 else 0.0
+            new = min(cur, max(PLACEMENT_MAX, round(cur - PLACEMENT_STEP, 2),
+                               eff_floor))
+            held = new >= cur - 1e-9
             reason = (f"Adjustment {cur:.0%} exceeds the +{PLACEMENT_MAX:.0%} "
-                      f"ceiling - step down {PLACEMENT_STEP:.0%} pts toward it.")
-            row = _pl_row(r, t, cur, new, "LOWER ADJUSTMENT", conf, reason)
+                      + (f"ceiling, but this campaign is already cutting base bids "
+                         f"{1 - lam:.0%} - stepping the adjustment down as well would "
+                         f"compound. Held this run; it comes down once the "
+                         f"suppression eases." if held else
+                         f"ceiling - step down toward it "
+                         f"({(1 + new) / (1 + cur) * lam - 1:+.0%} effective)."))
+            row = _pl_row(r, t, cur, new,
+                          "HOLD" if held else "LOWER ADJUSTMENT", conf, reason)
             row["Effective Change"] = round((1 + new) * lam / (1 + cur) - 1, 4)
             rows.append(row); adjs.append(new)
             continue
@@ -743,6 +803,15 @@ def _scale_step(step: float, orders: float, clicks: float) -> float:
     return step if _evidence_full(orders, clicks) else step * THIN_STEP_FACTOR
 
 
+def cap_is_slack(cpc: float, bid: float, clicks: float) -> bool:
+    """True when the bid cap demonstrably is not what limits this keyword.
+
+    Requires enough clicks to trust CPC at all: Cost is rounded to whole dollars
+    in Amazon exports, which at 1-5 clicks can distort CPC by ~30%."""
+    return (clicks >= CAP_SLACK_MIN_CLICKS and cpc > 0 and bid > 0
+            and cpc < CAP_SLACK_RATIO * bid)
+
+
 def _confidence(orders: float, clicks: float) -> str:
     if orders >= 5 and clicks >= 30:
         return "HIGH"
@@ -819,9 +888,19 @@ def optimize_keyword(r: pd.Series, s: CampaignStats, lam: float = 1.0,
     spend = r["Cost"]
     m_sales, acos, rpc = mature(spend, r["Sales"], clicks, allowance, r["ACOS"])
     rec = dict(action="HOLD", new_bid=bid, confidence="HIGH", reason="",
-               capped=False, eff=0.0)
+               capped=False, eff=0.0, cap_slack=False)
     mat_note = (f" [sales matured +{allowance / (1 - allowance):.0%} for pending "
                 f"conversions]" if allowance > 0 and m_sales > 0 else "")
+    # normalize() precomputes CPC; derive it if a caller passed a bare row
+    cpc = r["CPC"] if "CPC" in r.index else (spend / clicks if clicks else 0.0)
+    slack = cap_is_slack(cpc, bid, clicks)
+    rec["cap_slack"] = slack
+    slack_note = (f" NOTE: you only pay ${cpc:.2f} per click against a ${bid:.2f} "
+                  f"bid ({cpc / bid:.0%} of it), so this lowers the ceiling rather "
+                  f"than what you actually pay - the bid has to reach roughly "
+                  f"${cpc:.2f} before CPC moves. Expect several runs, or treat this "
+                  f"as a relevance / negative-keyword problem rather than a bid one."
+                  if slack and bid > 0 else "")
     lam_note = (f" Base bid also x{lam:.2f}: this campaign is suppressing a "
                 f"placement via base bids; the compensating adjustments hold this "
                 f"keyword's exposure at the surviving placements."
@@ -873,7 +952,7 @@ def optimize_keyword(r: pd.Series, s: CampaignStats, lam: float = 1.0,
             return finish(m, "LOWER BID", conf,
                           f"Matured ACOS {acos:.1%} over target {t:.1%} "
                           f"({acos / t:.1f}x) - step effective bid {m:+.0%}"
-                          f"{floor_note}{mat_note}.")
+                          f"{floor_note}{mat_note}.{slack_note}")
         if acos <= t * RAISE_BUFFER:
             base_step = (RAISE_STEP_STRONG if acos < t * STRONG_WINNER_RATIO
                          else RAISE_STEP)
@@ -882,6 +961,18 @@ def optimize_keyword(r: pd.Series, s: CampaignStats, lam: float = 1.0,
                 return finish(0.0, "HOLD", conf,
                               f"Matured ACOS {acos:.1%} under target but already at "
                               f"its revenue-justified effective bid{mat_note}.")
+            if slack:
+                # the cap is not binding, so a raise can only win auctions in the
+                # thin slice just above it - and observed competition is far below
+                return finish(0.0, "HOLD - BID NOT THE CONSTRAINT", conf,
+                              f"Matured ACOS {acos:.1%} is well under target {t:.1%} "
+                              f"and would earn {m:+.0%}, but you only pay ${cpc:.2f} "
+                              f"per click against a ${bid:.2f} bid "
+                              f"({cpc / bid:.0%} of it). You already win these "
+                              f"auctions well under your cap, so raising it buys "
+                              f"almost nothing. To grow this keyword, look at "
+                              f"impressions/relevance or its placements - not the "
+                              f"bid{mat_note}.")
             return finish(m, "RAISE BID", conf,
                           f"Matured ACOS {acos:.1%} well under target {t:.1%} - "
                           f"step effective bid {m:+.0%} (revenue-justified limit "
@@ -930,7 +1021,7 @@ def optimize_keyword(r: pd.Series, s: CampaignStats, lam: float = 1.0,
                       f"${s.target_cpa:.2f}) over {int(clicks)} clicks with 0 "
                       f"orders - step effective bid {m:+.0%} toward the "
                       f"anticipated-RPC level. Steps down again each run while "
-                      f"clicks keep not converting.")
+                      f"clicks keep not converting.{slack_note}")
 
     return finish(0.0, "WATCH", "LOW",
                   f"{int(clicks)} clicks, ${spend:.2f} spend - still under the "
@@ -985,7 +1076,8 @@ def _apply_low_click_bump(rec: dict, r: pd.Series, max_adj: float, max_cpc: floa
     never shrinks a larger raise."""
     if not _is_active(r) or r["Clicks"] > LOW_CLICK_CLICKS:
         return rec
-    if rec["action"] in ("LOWER BID", "PAUSE", "REVIEW - NO BID IN EXPORT"):
+    if rec["action"] in ("LOWER BID", "PAUSE", "REVIEW - NO BID IN EXPORT",
+                         "HOLD - BID NOT THE CONSTRAINT"):
         return rec
     if rec.get("eff", 0.0) >= LOW_CLICK_BUMP - 1e-9:
         return rec                                    # already a bigger raise
@@ -1066,6 +1158,7 @@ ACTION_FILLS = {
     "LOWER BASE (COMPENSATED)": PatternFill("solid", fgColor="DDEBF7"),
     "REVIEW - OFF-AMAZON": PatternFill("solid", fgColor="FCE4D6"),
     "REVIEW - NO BID IN EXPORT": PatternFill("solid", fgColor="D9D9D9"),
+    "HOLD - BID NOT THE CONSTRAINT": PatternFill("solid", fgColor="FFF2CC"),
 }
 PCT_COLS = {"ACOS", "CVR", "CTR", "Target ACOS", "Zero-Order Spend %",
             "Effective Change",
@@ -1190,6 +1283,17 @@ def settings_notes(target: float, window_days: int, max_cpc: float,
                              f"raise, or the effective-CPC ceiling"),
         ("Blank bids", "auto/ASIN targets that inherit the ad group default are "
                        "flagged REVIEW - NO BID IN EXPORT, never treated as $0"),
+        ("Bid cap must be binding", f"under down-only the bid is a true ceiling. If "
+                                    f"realized CPC is below {CAP_SLACK_RATIO:.0%} of "
+                                    f"the base bid (and there are "
+                                    f">= {CAP_SLACK_MIN_CLICKS} clicks), the cap is "
+                                    f"not what limits the keyword: raises are held "
+                                    f"as HOLD - BID NOT THE CONSTRAINT, and cuts are "
+                                    f"flagged as shaving an unused ceiling"),
+        ("Campaign types", "Sponsored Products only. Sponsored Brands campaigns in "
+                           "the same export are detected and skipped - their "
+                           "placement taxonomy and negative adjustments make SP "
+                           "rules invalid for them"),
         ("", ""),
         ("Data window advice", f"Longer windows need less maturing and give more "
                                f"confident calls: {window_days} days -> "
@@ -1271,6 +1375,15 @@ def main():
         os.makedirs(parent, exist_ok=True)
 
     kw_raw, pl_raw = load_inputs(kw_path, pl_path)
+    kw_raw, pl_raw, skipped = filter_to_sponsored_products(kw_raw, pl_raw)
+    if skipped:
+        print(f"Skipped {skipped['campaigns']} non-Sponsored-Products campaign(s) "
+              f"({', '.join(skipped['types'])}): {skipped['keyword_rows']} keyword "
+              f"rows, {skipped['placement_rows']} placement rows, "
+              f"${skipped['spend']:,.0f} spend. Sponsored Brands uses different "
+              f"placement rules, so this engine does not recommend for it.")
+        if kw_raw.empty:
+            fail("No Sponsored Products campaigns left after filtering.")
     kw, pl = normalize(kw_raw, True), normalize(pl_raw, False)
 
     targets = {}
