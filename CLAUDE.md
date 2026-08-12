@@ -20,6 +20,10 @@ is a planned future phase, not yet approved by the owner).
   The −20% values in the placement export are **Sponsored Brands** rows — do NOT
   generalize from them; the engine holds them as set and never emits a negative
   recommendation.
+- **Sponsored Products only.** Exports mix campaign types; SB campaigns are
+  detected via `Campaign type` and skipped (27% of rows / $1.9k spend in the
+  2026-07-29 export). SB has its own placement taxonomy and allows negative
+  adjustments, so SP rules are invalid for it.
 - Input schema matches the owner's hand-built exports (see `data/` samples).
   Sales column absent → derived as Cost ÷ ACOS.
 
@@ -69,6 +73,15 @@ Concrete rules:
   full-size evidence sample, with zero orders.
 - Low-traffic bump: active kw/target in an active ad group with ≤10 clicks gets
   +5% for exposure. A floor only — never overrides a cut/pause or a larger raise.
+- **Bid cap must be binding** (owner-directed 2026-08-03): under down-only the bid
+  is a true ceiling, so realized CPC ≤ bid always. If CPC < 70% of the base bid
+  (≥10 clicks), the cap is not what limits the keyword — a raise can only win the
+  empty slice above the old cap. Raises become `HOLD - BID NOT THE CONSTRAINT`;
+  cuts proceed but are flagged as shaving an unused ceiling. Column
+  `Bid Cap Unused` carries the flag independently of `Action`.
+  Measured against the BASE BID: using `base × (1+max adj)` was tested and
+  rejected — it compares a max ceiling to an average CPC and froze winners that
+  were paying ~100% of their base bid.
 - Hard effective-CPC ceiling **$1.85** (`--max-cpc`): the one rule allowed to
   exceed the 30% step cap. Owner constraint: never pay more than this anywhere.
 - CVR/AOV fallback hierarchy: campaign → account.

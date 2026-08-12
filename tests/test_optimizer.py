@@ -237,7 +237,8 @@ def _kseries(bid, clicks, orders, cost, sales, impr=1000):
     acos = cost / sales if sales else 0.0
     return pd.Series({"Current Bid": bid, "Clicks": clicks, "Conversions": orders,
                       "Cost": cost, "Sales": sales, "ACOS": acos,
-                      "Impressions": impr, "CVR": orders / clicks if clicks else 0})
+                      "Impressions": impr, "CVR": orders / clicks if clicks else 0,
+                      "CPC": cost / clicks if clicks else 0.0})
 
 
 def test_overtarget_cut_is_gentle_not_35pct():
@@ -453,3 +454,79 @@ def test_missing_identifier_columns_are_simply_omitted():
     n = _kw_df(bid=1.00, clicks=6, orders=0, cost=3.0, sales=0)
     out = eng.run_keyword_engine(n, {1: _stats()}, {1: (1.0, 0.0)})
     assert "Target ID" not in out.columns
+
+
+# ---- pCPC brake: a bid change only matters if the cap is binding ----
+def test_cap_is_slack_thresholds():
+    assert eng.cap_is_slack(cpc=0.28, bid=1.11, clicks=50) is True     # 25% of cap
+    assert eng.cap_is_slack(cpc=0.90, bid=1.00, clicks=50) is False    # 90%, binding
+    # CPC is untrustworthy on few clicks (Cost is rounded to whole dollars)
+    assert eng.cap_is_slack(cpc=0.28, bid=1.11, clicks=5) is False
+    assert eng.cap_is_slack(cpc=0.0, bid=1.11, clicks=50) is False     # no CPC signal
+
+
+def test_winner_with_slack_cap_is_not_raised():
+    """Good ACOS, but paying $0.28 against a $1.11 bid: raising the cap can only
+    win auctions in the empty slice above it."""
+    r = _kseries(bid=1.11, clicks=53, orders=5, cost=15.0, sales=15.0 / 0.154)
+    rec = eng.optimize_keyword(r, _stats())
+    assert rec["action"] == "HOLD - BID NOT THE CONSTRAINT"
+    assert rec["eff"] == 0.0
+    assert rec["new_bid"] == pytest.approx(1.11, abs=0.001)
+    assert "relevance" in rec["reason"]
+
+
+def test_winner_with_binding_cap_is_still_raised():
+    """Same good ACOS, but CPC sits at ~96% of the bid - the cap IS the limit."""
+    r = _kseries(bid=0.45, clicks=53, orders=5, cost=23.0, sales=23.0 / 0.154)
+    rec = eng.optimize_keyword(r, _stats())
+    assert rec["action"] == "RAISE BID"
+    assert rec["eff"] > 0
+
+
+def test_slack_cap_does_not_block_cuts_but_flags_them():
+    """An over-target keyword still gets cut - the cut just cannot bite until the
+    bid approaches realized CPC, and the reason has to say so."""
+    r = _kseries(bid=1.20, clicks=60, orders=4, cost=18.0, sales=18.0 / 0.60)
+    rec = eng.optimize_keyword(r, _stats())
+    assert rec["action"] == "LOWER BID"
+    assert rec["new_bid"] < 1.20
+    assert "lowers the ceiling rather than what you actually pay" in rec["reason"]
+
+
+def test_low_click_bump_cannot_undo_the_brake():
+    """The bump (<=10 clicks) and the brake (>=10 clicks) meet at exactly 10."""
+    rec = {"action": "HOLD - BID NOT THE CONSTRAINT", "new_bid": 1.11,
+           "eff": 0.0, "reason": "", "capped": False}
+    r = pd.Series({"Clicks": 10, "Current Bid": 1.11, "Campaign status": "enabled",
+                   "Ad group status": "enabled", "Status": "enabled"})
+    out = eng._apply_low_click_bump(rec, r, 0.0, 1.85, 1.0)
+    assert out["new_bid"] == pytest.approx(1.11, abs=1e-9)
+    assert out["action"] == "HOLD - BID NOT THE CONSTRAINT"
+
+
+# ---- Sponsored Brands campaigns must not get Sponsored Products rules ----
+def _typed_pl(cid, ctype):
+    return {"Campaign Name": f"c{cid}", "Campaign ID": cid, "Campaign type": ctype,
+            "Placement": "Top of Search on-Amazon", "Impressions": 100, "Clicks": 10,
+            "Conversions": 1, "Cost": 5.0, "ACOS": 0.2, "Current Adjustment": 0.0}
+
+
+def test_sponsored_brands_campaigns_are_excluded():
+    pl = pd.DataFrame([_typed_pl(1, "sponsoredProducts"), _typed_pl(2, "SB")])
+    kw = pd.DataFrame([{"Campaign ID": 1, "Cost": 10.0},
+                       {"Campaign ID": 2, "Cost": 25.0},
+                       {"Campaign ID": 2, "Cost": 5.0}])
+    kw2, pl2, info = eng.filter_to_sponsored_products(kw, pl)
+    assert set(kw2["Campaign ID"]) == {1}
+    assert set(pl2["Campaign ID"]) == {1}
+    assert info["campaigns"] == 1 and info["keyword_rows"] == 2
+    assert info["spend"] == pytest.approx(30.0)
+
+
+def test_filtering_is_a_noop_without_a_campaign_type_column():
+    """The hand-built sample schema has no Campaign type - nothing may be dropped."""
+    pl = pd.DataFrame([{"Campaign ID": 1, "Placement": "top_of_search"}])
+    kw = pd.DataFrame([{"Campaign ID": 1, "Cost": 1.0}])
+    kw2, pl2, info = eng.filter_to_sponsored_products(kw, pl)
+    assert info is None and len(kw2) == 1 and len(pl2) == 1
